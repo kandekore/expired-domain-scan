@@ -1,1 +1,45 @@
-/.qodo
+# Node modules
+node_modules/
+**/node_modules/
+
+# Dependency lock files (optional — keep if you want reproducible builds)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# Build outputs
+dist/
+build/
+.cache/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Database / storage files
+crawler.db
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# Coverage / test
+coverage/
+*.lcov
