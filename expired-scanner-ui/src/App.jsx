@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import Scanner from './Scanner';
 import Results from './Results';
+import Summary from './Summary'; // Import the new component
 
 export default function App() {
     const [page, setPage] = useState('scanner');
@@ -14,10 +15,15 @@ export default function App() {
                 <button onClick={() => setPage('results')} disabled={page === 'results'}>
                     Results
                 </button>
+                {/* Add the new Summary button */}
+                <button onClick={() => setPage('summary')} disabled={page === 'summary'}>
+                    Summary
+                </button>
             </nav>
 
             {page === 'scanner' && <Scanner />}
             {page === 'results' && <Results />}
+            {page === 'summary' && <Summary />}
         </div>
     );
 }

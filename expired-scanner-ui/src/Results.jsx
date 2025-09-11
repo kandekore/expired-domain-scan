@@ -55,12 +55,13 @@ export default function Results() {
                         <th align="left">Website Scanned</th>
                         <th align="left">Expired Domain Found</th>
                         <th align="left">Status</th>
+                        <th align="left">Expiry Date / Reason</th>
                         <th align="left">Date Found</th>
                     </tr>
                 </thead>
                 <tbody>
                     {isLoading ? (
-                        <tr><td colSpan="4">Loading...</td></tr>
+                        <tr><td colSpan="5">Loading...</td></tr>
                     ) : results.length ? (
                         results.map((result) => (
                             <tr key={result._id}>
@@ -76,12 +77,14 @@ export default function Results() {
                                     </a>
                                 </td>
                                 <td>{result.status}</td>
+                                {/* --- UPDATED LOGIC: Show date or reason --- */}
+                                <td>{result.expiryDate || result.expiryDateReason || 'N/A'}</td>
                                 <td>{new Date(result.foundAt).toLocaleString()}</td>
                             </tr>
                         ))
                     ) : (
                         <tr>
-                            <td colSpan={4} style={{ color: '#777' }}>
+                            <td colSpan="5" style={{ color: '#777' }}>
                                 No results found for the current filters.
                             </td>
                         </tr>

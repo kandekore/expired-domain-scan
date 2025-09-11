@@ -3,7 +3,21 @@ import cors from 'cors';
 import { EventEmitter } from 'node:events';
 import { URL } from 'node:url';
 import { MongoClient } from 'mongodb';
+import dotenv from 'dotenv';
 import { createCrawler } from './worker.js';
+
+// --- ADD THIS BLOCK TO CATCH UNHANDLED ERRORS ---
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Application specific logging, throwing an error, or other logic here
+});
+
+process.on('uncaughtException', (err, origin) => {
+  console.error(`Caught exception: ${err}\n` + `Exception origin: ${origin}`);
+});
+// --- END OF NEW BLOCK ---
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
@@ -13,7 +27,7 @@ app.use(express.json());
 const mongoUrl = process.env.MONGO_URL || 'mongodb://localhost:27017';
 const client = new MongoClient(mongoUrl);
 let resultsCollection;
-let scansCollection; // New collection for scan states
+let scansCollection;
 
 async function connectToMongo() {
   try {
@@ -21,7 +35,7 @@ async function connectToMongo() {
     console.log('Connected to MongoDB');
     const db = client.db('expired_domain_scanner');
     resultsCollection = db.collection('results');
-    scansCollection = db.collection('scans'); // Initialize scans collection
+    scansCollection = db.collection('scans');
   } catch (err) {
     console.error('Failed to connect to MongoDB', err);
     process.exit(1);
@@ -30,9 +44,8 @@ async function connectToMongo() {
 // --- End MongoDB Connection ---
 
 
-const scans = new Map(); // Emitters are still kept in memory for live updates
+const scans = new Map();
 
-// --- New Endpoint to Check Scan Status ---
 app.get('/scan/status', async (req, res) => {
     const { startUrl } = req.query;
     if (!startUrl) return res.status(400).json({ error: 'startUrl is required' });
@@ -58,7 +71,7 @@ app.get('/scan/status', async (req, res) => {
 
 
 app.post('/scan', async (req, res) => {
-  const { startUrl, maxPages = 1000, concurrency = 5, mode = 'new' } = req.body || {}; // mode can be 'new' or 'resume'
+  const { startUrl, maxPages = 1000, concurrency = 5, mode = 'new' } = req.body || {};
   if (!startUrl) return res.status(400).json({ error: 'startUrl is required' });
 
   let url;
@@ -83,7 +96,6 @@ app.post('/scan', async (req, res) => {
     } catch (e) { /* ignore */ }
   };
 
-  // Kick off the crawl
   createCrawler({
     startUrl,
     maxPages,
@@ -103,7 +115,6 @@ app.post('/scan', async (req, res) => {
   res.json({ id });
 });
 
-// Server-Sent Events (SSE) endpoint
 app.get('/events/:id', (req, res) => {
     const { id } = req.params;
     const rec = scans.get(id);
@@ -130,7 +141,6 @@ app.get('/events/:id', (req, res) => {
     });
 });
 
-// Endpoint for fetching stored results
 app.get('/results', async (req, res) => {
     const { website, tld } = req.query;
     const query = {};
@@ -142,6 +152,34 @@ app.get('/results', async (req, res) => {
     }
     const results = await resultsCollection.find(query).sort({ foundAt: -1 }).toArray();
     res.json(results);
+});
+
+app.get('/summary', async (req, res) => {
+    try {
+        const summary = await resultsCollection.aggregate([
+            {
+                $group: {
+                    _id: "$website",
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $project: {
+                    website: "$_id",
+                    count: 1,
+                    _id: 0
+                }
+            },
+            {
+                $sort: {
+                    website: 1
+                }
+            }
+        ]).toArray();
+        res.json(summary);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch summary' });
+    }
 });
 
 

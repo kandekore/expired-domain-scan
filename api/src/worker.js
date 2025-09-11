@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events';
 export const bus = new EventEmitter();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const normalizeUrl = (base, href) => {
   try {
     return new URL(href, base).toString();
@@ -18,74 +19,104 @@ const normalizeUrl = (base, href) => {
   }
 };
 
+async function getWhoisData(domain) {
+    const { WHMCS_API_URL, WHMCS_API_IDENTIFIER, WHMCS_API_SECRET } = process.env;
+
+    if (!WHMCS_API_URL || !WHMCS_API_IDENTIFIER || !WHMCS_API_SECRET) {
+        return { expiryDate: null, reason: "WHMCS credentials missing" };
+    }
+
+    const postData = {
+        identifier: WHMCS_API_IDENTIFIER,
+        secret: WHMCS_API_SECRET,
+        action: 'DomainWhois',
+        domain: domain,
+        responsetype: 'json',
+    };
+
+    try {
+        const response = await got.post(WHMCS_API_URL, { form: postData }).json();
+
+        // Case 1: API returns a direct error (e.g., TLD not supported)
+        if (response.result === 'error') {
+            return { expiryDate: null, reason: response.message || "API Error" };
+        }
+
+        // Case 2: Domain is available for registration
+        if (response.status === 'available') {
+            return { expiryDate: null, reason: "Available for registration" };
+        }
+
+        if (response.whois) {
+            // Case 3: WHOIS text is returned, try to find the date
+            const expiryMatch = response.whois.match(/Registry Expiry Date:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)/i);
+            
+            if (expiryMatch && expiryMatch[1]) {
+                const dateStr = expiryMatch[1].trim();
+                const date = new Date(dateStr);
+                
+                if (!isNaN(date)) {
+                    // Success! Return the date.
+                    return { expiryDate: date.toISOString().split('T')[0], reason: null };
+                }
+            }
+            
+            // Case 4: WHOIS text exists but doesn't contain the date (e.g., TLD lookup not supported by registrar)
+            return { expiryDate: null, reason: "WHOIS lookup not supported for this TLD" };
+        }
+
+    } catch (error) {
+        console.error(`WHMCS API call failed for ${domain}:`, error.message);
+        return { expiryDate: null, reason: "API call failed" };
+    }
+    
+    // Fallback case
+    return { expiryDate: null, reason: "Unknown reason" };
+}
+
 async function dnsHasAddresses(domain) {
   const detail = { steps: {} };
   try {
     const addrs = await dns.lookup(domain, { all: true, verbatim: false });
-    detail.steps.lookup = addrs;
-    if (Array.isArray(addrs) && addrs.length > 0) {
-      return { hasDns: true, nxDomain: false, detail };
-    }
-  } catch (e) {
-    detail.steps.lookupError = e?.code || e?.message || String(e);
-  }
+    if (Array.isArray(addrs) && addrs.length > 0) return { hasDns: true, nxDomain: false };
+  } catch (e) {}
   try {
     const a = await dns.resolve4(domain);
-    detail.steps.resolve4 = a;
-    if (a && a.length) return { hasDns: true, nxDomain: false, detail };
-  } catch (e) {
-    detail.steps.resolve4Error = e?.code || e?.message || String(e);
-  }
+    if (a && a.length) return { hasDns: true, nxDomain: false };
+  } catch (e) {}
   try {
     const aaaa = await dns.resolve6(domain);
-    detail.steps.resolve6 = aaaa;
-    if (aaaa && aaaa.length) return { hasDns: true, nxDomain: false, detail };
-  } catch (e) {
-    detail.steps.resolve6Error = e?.code || e?.message || String(e);
-  }
+    if (aaaa && aaaa.length) return { hasDns: true, nxDomain: false };
+  } catch (e) {}
   try {
     const cn = await dns.resolveCname(domain);
-    detail.steps.cname = cn;
     if (cn && cn.length) {
       const target = cn[0];
       try {
         const ta = await dns.resolve4(target);
-        detail.steps.cnameResolve4 = ta;
-        if (ta && ta.length) return { hasDns: true, nxDomain: false, detail };
-      } catch (e) {
-        detail.steps.cnameResolve4Error = e?.code || e?.message || String(e);
-      }
+        if (ta && ta.length) return { hasDns: true, nxDomain: false };
+      } catch (e) {}
       try {
         const taaaa = await dns.resolve6(target);
-        detail.steps.cnameResolve6 = taaaa;
-        if (taaaa && taaaa.length) return { hasDns: true, nxDomain: false, detail };
-      } catch (e) {
-        detail.steps.cnameResolve6Error = e?.code || e?.message || String(e);
-      }
+        if (taaaa && taaaa.length) return { hasDns: true, nxDomain: false };
+      } catch (e) {}
     }
-  } catch (e) {
-    detail.steps.cnameError = e?.code || e?.message || String(e);
-  }
+  } catch (e) {}
   try {
-    const anyRec = await dns.resolveAny(domain);
-    detail.steps.resolveAny = anyRec;
-    if (anyRec && anyRec.length) {
-      return { hasDns: true, nxDomain: false, detail };
-    }
+    await dns.resolveAny(domain);
+    return { hasDns: true, nxDomain: false };
   } catch (e) {
     const code = e?.code || '';
-    detail.steps.resolveAnyError = code;
     if (code === 'NXDOMAIN' || code === 'ENOTFOUND') {
-      return { hasDns: false, nxDomain: true, detail };
+      return { hasDns: false, nxDomain: true };
     }
   }
-  return { hasDns: false, nxDomain: false, detail };
+  return { hasDns: false, nxDomain: false };
 }
 
 async function fetchWithHeuristics(domain, events) {
   const tryFetch = async (proto) => {
     const url = `${proto}://${domain}`;
-    events?.emit('progress', { type: 'domain', stage: `fetch-${proto}-start`, domain });
     const res = await got(url, {
       method: 'GET',
       timeout: { request: 9000 },
@@ -95,58 +126,39 @@ async function fetchWithHeuristics(domain, events) {
     });
     return { ok: true, statusCode: res.statusCode };
   };
-
   try {
     return await tryFetch('https');
-  } catch (e) {
-    events?.emit('progress', { type: 'domain', stage: 'fetch-https-error', domain, error: e?.code || e?.message || String(e) });
-  }
-
+  } catch (e) {}
   try {
     return await tryFetch('http');
   } catch (e) {
-    events?.emit('progress', { type: 'domain', stage: 'fetch-http-error', domain, error: e?.code || e?.message || String(e) });
-    const code = e?.code || '';
-    return { ok: false, error: code || 'HTTP_ERROR' };
+    return { ok: false };
   }
 }
 
 async function checkDomain(domain, events, resultsCollection, website) {
     const asciiDomain = domain.includes('xn--') ? domain : punycode.toASCII(domain);
-  
-    events?.emit('progress', { type: 'domain', stage: 'dns-start', domain: asciiDomain });
-    let dnsResult;
-    try {
-      dnsResult = await dnsHasAddresses(asciiDomain);
-    } catch (e) {
-      dnsResult = { hasDns: false, nxDomain: false, detail: { fatal: e?.message || String(e) } };
-    }
-    events?.emit('progress', { type: 'domain', stage: 'dns-result', domain: asciiDomain, detail: dnsResult.detail || {}, hasDns: dnsResult.hasDns, nxDomain: dnsResult.nxDomain });
+    const dnsResult = await dnsHasAddresses(asciiDomain);
   
     let result;
     if (!dnsResult.hasDns && dnsResult.nxDomain) {
       result = { status: 'no-dns', code: 'NXDOMAIN' };
     } else {
-        const httpRes = await fetchWithHeuristics(asciiDomain, events);
-        if (httpRes.ok) {
-          result = { status: 'ok', httpStatus: httpRes.statusCode };
-        } else {
-            if (!dnsResult.hasDns && !dnsResult.nxDomain) {
-              result = { status: 'dns-error', code: 'INCONCLUSIVE_DNS' };
-            } else {
-                result = { status: 'http-error', code: httpRes.error || 'HTTP_ERROR' };
-            }
-        }
+      result = { status: 'ok' };
     }
   
     if (resultsCollection && result.status === 'no-dns') {
         const tld = asciiDomain.split('.').pop();
+        const whois = await getWhoisData(asciiDomain);
+
         const doc = {
             website,
             domain: asciiDomain,
             tld,
             status: result.status,
             code: result.code,
+            expiryDate: whois.expiryDate, // Will be the date or null
+            expiryDateReason: whois.reason, // Will be the reason or null
             foundAt: new Date()
         };
         await resultsCollection.updateOne({ website, domain: asciiDomain }, { $set: doc }, { upsert: true });
@@ -166,23 +178,19 @@ export function createCrawler({
 }) {
     const origin = new URL(startUrl).origin;
     const website = new URL(startUrl).hostname;
-    
     let visitedThisBatch = new Set();
     let foundOutbound = new Map();
-
     const robots = RobotsParser({
         robotsUrl: new URL('/robots.txt', origin).toString(),
         allowOnNeutral: true,
     });
-
     const queue = new PQueue({ concurrency });
-
     let statsTimer = null;
+
     function startStats(scanState) {
         if (statsTimer) return;
         let lastVisited = 0;
         let lastTime = Date.now();
-
         statsTimer = setInterval(() => {
             const now = Date.now();
             const dv = visitedThisBatch.size - lastVisited;
@@ -190,60 +198,39 @@ export function createCrawler({
             const crawlRate = dt > 0 ? dv / dt : 0;
             lastVisited = visitedThisBatch.size;
             lastTime = now;
-
             const totalVisited = (scanState.visited?.length || 0) + visitedThisBatch.size;
-            const etaSec = null; 
-
             events.emit('progress', {
                 type: 'stats',
                 visited: totalVisited,
                 inQueue: queue.size + scanState.queue.size,
                 checkedDomains: scanState.checkedDomains || 0,
-                maxPages: 'N/A',
-                concurrency,
                 crawlRate,
-                etaSec,
             });
         }, 1000);
     }
 
     async function crawl(url, scanState) {
-        if (visitedThisBatch.size >= batchSize) return;
-        if (scanState.visited.has(url) || visitedThisBatch.has(url)) return;
-        
+        if (visitedThisBatch.size >= batchSize || scanState.visited.has(url) || visitedThisBatch.has(url)) return;
         visitedThisBatch.add(url);
-
         events.emit('progress', { type: 'page', stage: 'enqueue', url, visited: (scanState.visited?.size || 0) + visitedThisBatch.size });
-
         try {
-            const allowed = await robots.canCrawl(url, 'ExpiredBot');
-            if (!allowed) return;
-        } catch { /* ignore robots errors */ }
-
-        try {
+            if (!(await robots.canCrawl(url, 'ExpiredBot'))) return;
             const res = await got(url, { timeout: { request: 10000 }, followRedirect: true });
-            events.emit('progress', { type: 'page', stage: 'fetch-ok', url, status: res.statusCode });
-
             const $ = cheerio.load(res.body);
-            const links = new Set();
-            $('a[href]').each((_, a) => {
-                const href = $(a).attr('href');
+            for (const el of $('a[href]')) {
+                const href = $(el).attr('href');
                 const abs = normalizeUrl(url, href);
-                if (abs) links.add(abs);
-            });
-
-            for (const l of links) {
-                const u = new URL(l);
+                if (!abs) continue;
+                const u = new URL(abs);
                 if (u.origin === origin) {
-                    if (!scanState.visited.has(l) && !visitedThisBatch.has(l)) {
-                        scanState.queue.add(l);
+                    if (!scanState.visited.has(abs) && !visitedThisBatch.has(abs)) {
+                        scanState.queue.add(abs);
                     }
                 } else {
                     const domain = u.hostname;
                     if (!foundOutbound.has(domain)) {
                         foundOutbound.set(domain, true);
                         queue.add(async () => {
-                            events.emit('progress', { type: 'domain', stage: 'check-start', domain });
                             const result = await checkDomain(domain, events, resultsCollection, website);
                             scanState.checkedDomains = (scanState.checkedDomains || 0) + 1;
                             events.emit('progress', { type: 'domain', stage: 'check-done', domain, result });
@@ -252,78 +239,38 @@ export function createCrawler({
                 }
             }
             await sleep(250);
-        } catch (err) {
-            events.emit('progress', { type: 'page', stage: 'fetch-error', url, error: err.message });
-        }
+        } catch (err) {}
     }
 
     return {
         async start() {
             let scanStateDoc = await scansCollection.findOne({ website });
-
             if (mode === 'new' || !scanStateDoc) {
-                if (scanStateDoc) {
-                    await scansCollection.deleteOne({ website });
-                }
-                scanStateDoc = {
-                    website,
-                    startUrl,
-                    status: 'running',
-                    queue: [startUrl],
-                    visited: [],
-                    checkedDomains: 0,
-                    createdAt: new Date(),
-                };
+                if(scanStateDoc) await scansCollection.deleteOne({ website });
+                scanStateDoc = { website, startUrl, status: 'running', queue: [startUrl], visited: [], checkedDomains: 0, createdAt: new Date() };
             } else {
                 scanStateDoc.status = 'running';
             }
-            
-            const scanState = {
-                ...scanStateDoc,
-                queue: new Set(scanStateDoc.queue),
-                visited: new Set(scanStateDoc.visited)
-            };
-            
+            const scanState = { ...scanStateDoc, queue: new Set(scanStateDoc.queue), visited: new Set(scanStateDoc.visited) };
             startStats(scanState);
             events.emit('progress', { type: 'start', startUrl, batchSize, concurrency, mode });
-
             while (scanState.queue.size > 0 && visitedThisBatch.size < batchSize) {
                 const nextUrl = scanState.queue.values().next().value;
                 scanState.queue.delete(nextUrl);
-                
                 if (!scanState.visited.has(nextUrl) && !visitedThisBatch.has(nextUrl)) {
                     queue.add(() => crawl(nextUrl, scanState));
                 }
             }
-
             await queue.onIdle();
             if (statsTimer) clearInterval(statsTimer);
-
             const finalVisited = new Set([...scanState.visited, ...visitedThisBatch]);
             const finalQueue = new Set([...scanState.queue]);
-            
             const newStatus = finalQueue.size === 0 ? 'completed' : 'paused';
-
-            await scansCollection.updateOne(
-                { website },
-                {
-                    $set: {
-                        status: newStatus,
-                        queue: Array.from(finalQueue),
-                        visited: Array.from(finalVisited),
-                        checkedDomains: scanState.checkedDomains || 0,
-                        updatedAt: new Date(),
-                    },
-                    $setOnInsert: { createdAt: new Date(), startUrl, website }
-                },
-                { upsert: true }
-            );
-
-            events.emit('progress', {
-                type: newStatus === 'completed' ? 'done' : 'paused',
-                totalPages: finalVisited.size,
-                domains: scanState.checkedDomains,
-            });
+            await scansCollection.updateOne({ website }, {
+                $set: { status: newStatus, queue: Array.from(finalQueue), visited: Array.from(finalVisited), checkedDomains: scanState.checkedDomains || 0, updatedAt: new Date() },
+                $setOnInsert: { createdAt: new Date(), startUrl, website }
+            }, { upsert: true });
+            events.emit('progress', { type: newStatus === 'completed' ? 'done' : 'paused', totalPages: finalVisited.size, domains: scanState.checkedDomains });
         },
     };
 }
