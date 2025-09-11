@@ -12,6 +12,7 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "got": "^14.4.1",
+    "mongodb": "^6.19.0",
     "p-queue": "^8.0.1",
     "robots-txt-parser": "^2.0.3"
   },
