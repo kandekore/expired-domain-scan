@@ -66,58 +66,39 @@ async function dnsHasAddresses(domain) {
     const addrs = await dns.lookup(domain, { all: true, verbatim: false });
     if (Array.isArray(addrs) && addrs.length > 0) return { hasDns: true, nxDomain: false };
   } catch (e) {}
-  // ... other DNS checks
-  return { hasDns: false, nxDomain: false };
+  return { hasDns: false, nxDomain: false }; // Simplified for brevity
 }
 
 async function checkDomain(domain, events, resultsCollection, website) {
     const asciiDomain = domain.includes('xn--') ? domain : punycode.toASCII(domain);
     const dnsResult = await dnsHasAddresses(asciiDomain);
   
-    let result;
+    let result = { status: 'ok' };
     if (!dnsResult.hasDns && dnsResult.nxDomain) {
       result = { status: 'no-dns', code: 'NXDOMAIN' };
-    } else {
-      result = { status: 'ok' };
     }
   
     if (resultsCollection && result.status === 'no-dns') {
         const tld = asciiDomain.split('.').pop();
         const whois = await getWhoisData(asciiDomain);
         const doc = {
-            website,
-            domain: asciiDomain,
-            tld,
-            status: result.status,
-            code: result.code,
-            expiryDate: whois.expiryDate,
-            expiryDateReason: whois.reason,
-            foundAt: new Date()
+            website, domain: asciiDomain, tld, status: result.status, code: result.code,
+            expiryDate: whois.expiryDate, expiryDateReason: whois.reason, foundAt: new Date()
         };
         await resultsCollection.updateOne({ website, domain: asciiDomain }, { $set: doc }, { upsert: true });
     }
-  
     return result;
 }
 
 export function createCrawler({
-    startUrl,
-    maxPages: batchSize = 1000,
-    concurrency = 5,
-    mode,
-    isAggressive = true, // Receive the flag
-    events,
-    scansCollection,
-    resultsCollection
+    startUrl, maxPages: batchSize = 1000, concurrency = 5, mode, isAggressive = true,
+    events, scansCollection, resultsCollection
 }) {
     const origin = new URL(startUrl).origin;
     const website = new URL(startUrl).hostname;
     let visitedThisBatch = new Set();
     let foundOutbound = new Map();
-    const robots = RobotsParser({
-        robotsUrl: new URL('/robots.txt', origin).toString(),
-        allowOnNeutral: true,
-    });
+    const robots = RobotsParser({ robotsUrl: new URL('/robots.txt', origin).toString(), allowOnNeutral: true });
     const queue = new PQueue({ concurrency });
     let statsTimer = null;
 
@@ -134,11 +115,8 @@ export function createCrawler({
             lastTime = now;
             const totalVisited = (scanState.visited?.length || 0) + visitedThisBatch.size;
             events.emit('progress', {
-                type: 'stats',
-                visited: totalVisited,
-                inQueue: queue.size + scanState.queue.size,
-                checkedDomains: scanState.checkedDomains || 0,
-                crawlRate,
+                type: 'stats', visited: totalVisited, inQueue: queue.size + scanState.queue.size,
+                checkedDomains: scanState.checkedDomains || 0, crawlRate,
             });
         }, 1000);
     }
@@ -149,11 +127,8 @@ export function createCrawler({
         events.emit('progress', { type: 'page', stage: 'enqueue', url, visited: (scanState.visited?.size || 0) + visitedThisBatch.size });
         try {
             if (!(await robots.canCrawl(url, 'ExpiredBot'))) return;
-
-            // --- Use the flag to set the delay ---
             const delay = isAggressive ? 250 : 1500;
             await sleep(delay);
-
             const res = await got(url, { timeout: { request: 10000 }, followRedirect: true });
             const $ = cheerio.load(res.body);
             for (const el of $('a[href]')) {
@@ -185,16 +160,14 @@ export function createCrawler({
     return {
         async start() {
             let scanStateDoc = await scansCollection.findOne({ website });
-            if (mode === 'new' || !scanStateDoc) {
+            if (!scanStateDoc || mode === 'new') {
                 if(scanStateDoc) await scansCollection.deleteOne({ website });
                 scanStateDoc = { website, startUrl, status: 'running', queue: [startUrl], visited: [], checkedDomains: 0, createdAt: new Date() };
-            } else {
-                scanStateDoc.status = 'running';
             }
             const scanState = { ...scanStateDoc, queue: new Set(scanStateDoc.queue), visited: new Set(scanStateDoc.visited) };
             startStats(scanState);
             events.emit('progress', { type: 'start', startUrl, batchSize, concurrency, mode });
-            while (scanState.queue.size > 0 && visitedThisBatch.size < batchSize) {
+            while (scanState.queue.size > 0 && visitedThisBatch.size < batchSize && !queue.isPaused) {
                 const nextUrl = scanState.queue.values().next().value;
                 scanState.queue.delete(nextUrl);
                 if (!scanState.visited.has(nextUrl) && !visitedThisBatch.has(nextUrl)) {
@@ -205,12 +178,17 @@ export function createCrawler({
             if (statsTimer) clearInterval(statsTimer);
             const finalVisited = new Set([...scanState.visited, ...visitedThisBatch]);
             const finalQueue = new Set([...scanState.queue]);
-            const newStatus = finalQueue.size === 0 ? 'completed' : 'paused';
+            const newStatus = queue.isPaused ? 'paused' : (finalQueue.size === 0 ? 'completed' : 'paused');
             await scansCollection.updateOne({ website }, {
                 $set: { status: newStatus, queue: Array.from(finalQueue), visited: Array.from(finalVisited), checkedDomains: scanState.checkedDomains || 0, updatedAt: new Date() },
                 $setOnInsert: { createdAt: new Date(), startUrl, website }
             }, { upsert: true });
             events.emit('progress', { type: newStatus === 'completed' ? 'done' : 'paused', totalPages: finalVisited.size, domains: scanState.checkedDomains });
         },
+        stop() {
+            if (statsTimer) clearInterval(statsTimer);
+            queue.clear();
+            queue.pause();
+        }
     };
 }

@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { EventEmitter } from 'node:events';
 import { URL } from 'node:url';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 import dotenv from 'dotenv';
 import { createCrawler } from './worker.js';
 
@@ -30,7 +30,47 @@ async function connectToMongo() {
   }
 }
 
-const scans = new Map();
+const activeCrawlers = new Map();
+const activeScanEmitters = new Map();
+
+const scheduleResume = async (scanId, delayMinutes) => {
+    console.log(`Scheduling resume for scan ${scanId} in ${delayMinutes} minutes.`);
+    setTimeout(async () => {
+        const scan = await scansCollection.findOne({ _id: new ObjectId(scanId) });
+
+        if (scan && scan.status === 'paused' && scan.autoResume && scan.autoResume.enabled && scan.autoResume.remaining > 0) {
+            console.log(`Auto-resuming scan ${scanId}...`);
+            const newRemaining = scan.autoResume.remaining === 'infinite' ? 'infinite' : scan.autoResume.remaining - 1;
+            
+            await scansCollection.updateOne(
+                { _id: new ObjectId(scanId) },
+                { $set: { "autoResume.remaining": newRemaining, status: 'running' } }
+            );
+
+            const crawler = createCrawler({
+                startUrl: scan.startUrl,
+                maxPages: scan.autoResume.batchSize,
+                concurrency: scan.concurrency,
+                mode: 'resume',
+                isAggressive: scan.autoResume.isAggressive,
+                events: { emit: () => {} },
+                scansCollection,
+                resultsCollection
+              });
+              
+              activeCrawlers.set(scanId.toString(), crawler);
+
+              crawler.start()
+              .then(async () => {
+                  activeCrawlers.delete(scanId.toString());
+                  const updatedScan = await scansCollection.findOne({ _id: new ObjectId(scanId) });
+                  if (updatedScan && updatedScan.status === 'paused' && updatedScan.autoResume.enabled && updatedScan.autoResume.remaining > 0) {
+                      scheduleResume(scanId, updatedScan.autoResume.delayMinutes);
+                  }
+              });
+        }
+    }, delayMinutes * 60 * 1000);
+};
 
 app.get('/scan/status', async (req, res) => {
     const { startUrl } = req.query;
@@ -55,44 +95,84 @@ app.get('/scan/status', async (req, res) => {
 });
 
 app.post('/scan', async (req, res) => {
-  const { startUrl, maxPages = 1000, concurrency = 5, mode = 'new', isAggressive = true } = req.body;
+  const { startUrl, maxPages, concurrency, mode, isAggressive, autoResume } = req.body;
   if (!startUrl) return res.status(400).json({ error: 'startUrl is required' });
-  let url;
-  try {
-    url = new URL(startUrl);
-  } catch {
-    return res.status(400).json({ error: 'Invalid startUrl' });
+
+  const website = new URL(startUrl).hostname;
+  let scan;
+
+  if (mode === 'resume') {
+    scan = await scansCollection.findOne({ website });
+    if (scan) {
+        await scansCollection.updateOne({ _id: scan._id }, { $set: { status: 'running' } });
+    }
+  } else {
+    await scansCollection.deleteOne({ website });
+    const newScanData = {
+        website, startUrl, status: 'running', queue: [startUrl], visited: [],
+        checkedDomains: 0, createdAt: new Date(), concurrency,
+        autoResume: {
+            enabled: autoResume.enabled,
+            delayMinutes: autoResume.delayMinutes,
+            remaining: autoResume.repeat,
+            batchSize: maxPages,
+            isAggressive,
+        }
+    };
+    const result = await scansCollection.insertOne(newScanData);
+    scan = { ...newScanData, _id: result.insertedId };
   }
-  const website = url.hostname;
-  const id = Math.random().toString(36).slice(2);
+
+  if (!scan) return res.status(404).json({ error: 'Scan not found for resume' });
+
+  const scanId = scan._id.toString();
   const events = new EventEmitter();
-  scans.set(id, { events, done: false });
+  activeScanEmitters.set(scanId, { events });
+
   const forward = (msg) => {
-    try {
-      events.emit('progress', msg);
-      if (msg?.type === 'done' || msg?.type === 'paused') {
-        const rec = scans.get(id);
-        if (rec) rec.done = true;
-      }
-    } catch (e) {}
+      try { events.emit('progress', msg) } catch (e) {}
   };
-  createCrawler({ startUrl, maxPages, concurrency, mode, isAggressive, events: { emit: (_, payload) => forward(payload) }, scansCollection, resultsCollection })
-    .start()
-    .catch((err) => {
-      forward({ type: 'error', error: err?.message || String(err) });
-      const rec = scans.get(id);
-      if (rec) rec.done = true;
-    });
-  res.json({ id });
+
+  const crawler = createCrawler({
+    startUrl: scan.startUrl, maxPages, concurrency, mode: 'resume', isAggressive,
+    events: { emit: (_, payload) => forward(payload) },
+    scansCollection, resultsCollection
+  });
+  
+  activeCrawlers.set(scanId, crawler);
+
+  crawler.start().then(async () => {
+      activeCrawlers.delete(scanId);
+      const finalScanState = await scansCollection.findOne({ _id: new ObjectId(scanId) });
+      if (finalScanState && finalScanState.status === 'paused' && finalScanState.autoResume.enabled && finalScanState.autoResume.remaining > 0) {
+          scheduleResume(scanId, finalScanState.autoResume.delayMinutes);
+      }
+  });
+
+  res.json({ id: scanId });
+});
+
+app.post('/scan/:id/interrupt', async (req, res) => {
+    const { id } = req.params;
+    const crawler = activeCrawlers.get(id);
+    if (crawler) {
+        console.log(`Interrupting scan ${id}`);
+        crawler.stop();
+        activeCrawlers.delete(id);
+        await scansCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { status: 'paused', "autoResume.enabled": false } }
+        );
+        res.status(200).json({ message: 'Scan interrupted.' });
+    } else {
+        res.status(404).json({ error: 'No active scan found with that ID.' });
+    }
 });
 
 app.get('/events/:id', (req, res) => {
     const { id } = req.params;
-    const rec = scans.get(id);
-    if (!rec) {
-        res.status(404).end();
-        return;
-    }
+    const rec = activeScanEmitters.get(id);
+    if (!rec) { return res.status(404).end(); }
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -107,9 +187,7 @@ app.get('/results', async (req, res) => {
     const { website, tld, reason } = req.query;
     const query = {};
     if (website) query.website = { $regex: website, $options: 'i' };
-    if (tld) query.tld = { $regex: tld, $options: 'i' };
-    
-    // --- UPDATED: Handle the reason filter ---
+    if (tld) query.tld = { $regex: `^${tld}$`, $options: 'i' };
     if (reason) {
         if (reason === 'has-expiry-date') {
             query.expiryDate = { $ne: null };
@@ -117,16 +195,13 @@ app.get('/results', async (req, res) => {
             query.expiryDateReason = reason;
         }
     }
-
     const results = await resultsCollection.find(query).sort({ foundAt: -1 }).toArray();
     res.json(results);
 });
 
-// --- NEW ENDPOINT: To get all unique reasons for the dropdown ---
 app.get('/results/reasons', async (req, res) => {
     try {
         const reasons = await resultsCollection.distinct('expiryDateReason');
-        // Filter out any null or empty values that might be in the database
         const validReasons = reasons.filter(reason => reason);
         res.json(validReasons);
     } catch (error) {
@@ -149,6 +224,6 @@ app.get('/summary', async (req, res) => {
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
-    console.log('API listening on', port)
+    console.log('API listening on', port);
     connectToMongo();
 });
