@@ -35,7 +35,6 @@ const scans = new Map();
 app.get('/scan/status', async (req, res) => {
     const { startUrl } = req.query;
     if (!startUrl) return res.status(400).json({ error: 'startUrl is required' });
-
     try {
         const url = new URL(startUrl);
         const website = url.hostname;
@@ -58,19 +57,16 @@ app.get('/scan/status', async (req, res) => {
 app.post('/scan', async (req, res) => {
   const { startUrl, maxPages = 1000, concurrency = 5, mode = 'new', isAggressive = true } = req.body;
   if (!startUrl) return res.status(400).json({ error: 'startUrl is required' });
-
   let url;
   try {
     url = new URL(startUrl);
   } catch {
     return res.status(400).json({ error: 'Invalid startUrl' });
   }
-
   const website = url.hostname;
   const id = Math.random().toString(36).slice(2);
   const events = new EventEmitter();
   scans.set(id, { events, done: false });
-
   const forward = (msg) => {
     try {
       events.emit('progress', msg);
@@ -78,26 +74,15 @@ app.post('/scan', async (req, res) => {
         const rec = scans.get(id);
         if (rec) rec.done = true;
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   };
-
-  createCrawler({
-    startUrl,
-    maxPages,
-    concurrency,
-    mode,
-    isAggressive, // Pass the flag to the worker
-    events: { emit: (_, payload) => forward(payload) },
-    scansCollection,
-    resultsCollection
-  })
+  createCrawler({ startUrl, maxPages, concurrency, mode, isAggressive, events: { emit: (_, payload) => forward(payload) }, scansCollection, resultsCollection })
     .start()
     .catch((err) => {
       forward({ type: 'error', error: err?.message || String(err) });
       const rec = scans.get(id);
       if (rec) rec.done = true;
     });
-
   res.json({ id });
 });
 
@@ -111,28 +96,42 @@ app.get('/events/:id', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
-    const send = (msg) => {
-        res.write(`data: ${JSON.stringify(msg)}\n\n`);
-    };
+    const send = (msg) => res.write(`data: ${JSON.stringify(msg)}\n\n`);
     send({ type: 'connected', id });
     const onProgress = (msg) => send(msg);
     rec.events.on('progress', onProgress);
-    req.on('close', () => {
-        rec.events.off('progress', onProgress);
-    });
+    req.on('close', () => rec.events.off('progress', onProgress));
 });
 
 app.get('/results', async (req, res) => {
-    const { website, tld } = req.query;
+    const { website, tld, reason } = req.query;
     const query = {};
-    if (website) {
-        query.website = { $regex: website, $options: 'i' };
+    if (website) query.website = { $regex: website, $options: 'i' };
+    if (tld) query.tld = { $regex: tld, $options: 'i' };
+    
+    // --- UPDATED: Handle the reason filter ---
+    if (reason) {
+        if (reason === 'has-expiry-date') {
+            query.expiryDate = { $ne: null };
+        } else {
+            query.expiryDateReason = reason;
+        }
     }
-    if (tld) {
-        query.tld = tld;
-    }
+
     const results = await resultsCollection.find(query).sort({ foundAt: -1 }).toArray();
     res.json(results);
+});
+
+// --- NEW ENDPOINT: To get all unique reasons for the dropdown ---
+app.get('/results/reasons', async (req, res) => {
+    try {
+        const reasons = await resultsCollection.distinct('expiryDateReason');
+        // Filter out any null or empty values that might be in the database
+        const validReasons = reasons.filter(reason => reason);
+        res.json(validReasons);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch reasons' });
+    }
 });
 
 app.get('/summary', async (req, res) => {
