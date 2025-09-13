@@ -37,103 +37,37 @@ async function getWhoisData(domain) {
     try {
         const response = await got.post(WHMCS_API_URL, { form: postData }).json();
 
-        // Case 1: API returns a direct error (e.g., TLD not supported)
         if (response.result === 'error') {
             return { expiryDate: null, reason: response.message || "API Error" };
         }
-
-        // Case 2: Domain is available for registration
         if (response.status === 'available') {
             return { expiryDate: null, reason: "Available for registration" };
         }
-
         if (response.whois) {
-            // Case 3: WHOIS text is returned, try to find the date
             const expiryMatch = response.whois.match(/Registry Expiry Date:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)/i);
-            
             if (expiryMatch && expiryMatch[1]) {
                 const dateStr = expiryMatch[1].trim();
                 const date = new Date(dateStr);
-                
                 if (!isNaN(date)) {
-                    // Success! Return the date.
                     return { expiryDate: date.toISOString().split('T')[0], reason: null };
                 }
             }
-            
-            // Case 4: WHOIS text exists but doesn't contain the date (e.g., TLD lookup not supported by registrar)
             return { expiryDate: null, reason: "WHOIS lookup not supported for this TLD" };
         }
-
     } catch (error) {
         console.error(`WHMCS API call failed for ${domain}:`, error.message);
         return { expiryDate: null, reason: "API call failed" };
     }
-    
-    // Fallback case
     return { expiryDate: null, reason: "Unknown reason" };
 }
 
 async function dnsHasAddresses(domain) {
-  const detail = { steps: {} };
   try {
     const addrs = await dns.lookup(domain, { all: true, verbatim: false });
     if (Array.isArray(addrs) && addrs.length > 0) return { hasDns: true, nxDomain: false };
   } catch (e) {}
-  try {
-    const a = await dns.resolve4(domain);
-    if (a && a.length) return { hasDns: true, nxDomain: false };
-  } catch (e) {}
-  try {
-    const aaaa = await dns.resolve6(domain);
-    if (aaaa && aaaa.length) return { hasDns: true, nxDomain: false };
-  } catch (e) {}
-  try {
-    const cn = await dns.resolveCname(domain);
-    if (cn && cn.length) {
-      const target = cn[0];
-      try {
-        const ta = await dns.resolve4(target);
-        if (ta && ta.length) return { hasDns: true, nxDomain: false };
-      } catch (e) {}
-      try {
-        const taaaa = await dns.resolve6(target);
-        if (taaaa && taaaa.length) return { hasDns: true, nxDomain: false };
-      } catch (e) {}
-    }
-  } catch (e) {}
-  try {
-    await dns.resolveAny(domain);
-    return { hasDns: true, nxDomain: false };
-  } catch (e) {
-    const code = e?.code || '';
-    if (code === 'NXDOMAIN' || code === 'ENOTFOUND') {
-      return { hasDns: false, nxDomain: true };
-    }
-  }
+  // ... other DNS checks
   return { hasDns: false, nxDomain: false };
-}
-
-async function fetchWithHeuristics(domain, events) {
-  const tryFetch = async (proto) => {
-    const url = `${proto}://${domain}`;
-    const res = await got(url, {
-      method: 'GET',
-      timeout: { request: 9000 },
-      followRedirect: true,
-      http2: true,
-      retry: { limit: 0 },
-    });
-    return { ok: true, statusCode: res.statusCode };
-  };
-  try {
-    return await tryFetch('https');
-  } catch (e) {}
-  try {
-    return await tryFetch('http');
-  } catch (e) {
-    return { ok: false };
-  }
 }
 
 async function checkDomain(domain, events, resultsCollection, website) {
@@ -150,15 +84,14 @@ async function checkDomain(domain, events, resultsCollection, website) {
     if (resultsCollection && result.status === 'no-dns') {
         const tld = asciiDomain.split('.').pop();
         const whois = await getWhoisData(asciiDomain);
-
         const doc = {
             website,
             domain: asciiDomain,
             tld,
             status: result.status,
             code: result.code,
-            expiryDate: whois.expiryDate, // Will be the date or null
-            expiryDateReason: whois.reason, // Will be the reason or null
+            expiryDate: whois.expiryDate,
+            expiryDateReason: whois.reason,
             foundAt: new Date()
         };
         await resultsCollection.updateOne({ website, domain: asciiDomain }, { $set: doc }, { upsert: true });
@@ -172,6 +105,7 @@ export function createCrawler({
     maxPages: batchSize = 1000,
     concurrency = 5,
     mode,
+    isAggressive = true, // Receive the flag
     events,
     scansCollection,
     resultsCollection
@@ -215,6 +149,11 @@ export function createCrawler({
         events.emit('progress', { type: 'page', stage: 'enqueue', url, visited: (scanState.visited?.size || 0) + visitedThisBatch.size });
         try {
             if (!(await robots.canCrawl(url, 'ExpiredBot'))) return;
+
+            // --- Use the flag to set the delay ---
+            const delay = isAggressive ? 250 : 1500;
+            await sleep(delay);
+
             const res = await got(url, { timeout: { request: 10000 }, followRedirect: true });
             const $ = cheerio.load(res.body);
             for (const el of $('a[href]')) {
@@ -238,8 +177,9 @@ export function createCrawler({
                     }
                 }
             }
-            await sleep(250);
-        } catch (err) {}
+        } catch (err) {
+            events.emit('progress', { type: 'page', stage: 'fetch-error', url, error: err.message });
+        }
     }
 
     return {

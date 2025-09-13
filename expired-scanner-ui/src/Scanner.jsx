@@ -11,16 +11,15 @@ export default function Scanner() {
     visited: 0,
     inQueue: 0,
     checkedDomains: 0,
-    maxPages: 1000, // This now controls the batch size
+    maxPages: 1000,
     crawlRate: 0,
     etaSec: null,
     concurrency: 5,
   });
   const [statusLine, setStatusLine] = useState('Idle');
-
   const [existingScan, setExistingScan] = useState(null);
   const [isCheckingScan, setIsCheckingScan] = useState(false);
-
+  const [isAggressive, setIsAggressive] = useState(true);
   const evtRef = useRef(null);
 
   useEffect(() => {
@@ -40,7 +39,6 @@ export default function Scanner() {
         setIsCheckingScan(false);
       }
     };
-
     const handler = setTimeout(() => checkScanStatus(), 500);
     return () => clearTimeout(handler);
   }, [startUrl]);
@@ -57,6 +55,7 @@ export default function Scanner() {
       maxPages: stats.maxPages,
       concurrency: stats.concurrency,
       mode,
+      isAggressive,
     });
 
     setScanId(data.id);
@@ -67,7 +66,6 @@ export default function Scanner() {
     es.onmessage = (e) => {
       const msg = JSON.parse(e.data);
       setProgress((p) => [...p, msg]);
-
       switch (msg.type) {
         case 'connected':
           setStatusLine('Connected to scan stream.');
@@ -148,18 +146,11 @@ export default function Scanner() {
   }, []);
 
   const filtered = domains.filter((d) => d.result?.status === 'no-dns');
-  const etaText =
-    stats.etaSec == null
-      ? '—'
-      : stats.etaSec > 90
-      ? `${Math.round(stats.etaSec / 60)}m`
-      : `${Math.round(stats.etaSec)}s`;
 
   return (
     <div>
       <h1>Expired Outbound Link Scanner</h1>
       <p>Find external links to domains that don’t resolve (likely expired).</p>
-
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <input
           value={startUrl}
@@ -194,7 +185,6 @@ export default function Scanner() {
             disabled={isScanning}
           />
         </label>
-        
         {!existingScan ? (
             <button onClick={() => startScan('new')} disabled={isScanning || isCheckingScan || !startUrl.trim()}>
                 {isCheckingScan ? 'Checking…' : (isScanning ? 'Scanning…' : 'Start Scan')}
@@ -210,19 +200,28 @@ export default function Scanner() {
             </div>
         )}
       </div>
-      
+      <div style={{ marginTop: '12px' }}>
+        <label style={{ fontSize: 14, cursor: 'pointer' }}>
+            <input 
+                type="checkbox" 
+                checked={isAggressive} 
+                onChange={(e) => setIsAggressive(e.target.checked)}
+                disabled={isScanning}
+                style={{ verticalAlign: 'middle', marginRight: '6px' }}
+            />
+            Aggressive Crawl (faster, but may be blocked by some sites)
+        </label>
+      </div>
       {existingScan && !isScanning && (
           <p style={{ fontSize: 12, color: '#999', margin: '8px 0'}}>
               Found a paused scan for this site. Queue has {existingScan.queueCount} URLs remaining.
           </p>
       )}
-
       {scanId && (
         <p style={{ marginTop: 8, fontSize: 12, color: '#555' }}>
           Scan ID: <code>{scanId}</code>
         </p>
       )}
-
       <div
         style={{
           marginTop: 12,
@@ -236,17 +235,14 @@ export default function Scanner() {
       >
         {statusLine}
       </div>
-
       <div style={{ marginTop: 16 }}>
         <div style={{ display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 14, flexWrap: 'wrap' }}>
           <div>Total Pages Visited: {stats.visited}</div>
           <div>URLs in Queue: {stats.inQueue}</div>
           <div>Domains Checked: {stats.checkedDomains}</div>
           <div>Rate: {stats.crawlRate?.toFixed(2) ?? 0} p/s</div>
-          <div>Batch ETA: {etaText}</div>
         </div>
       </div>
-
       <h3 style={{ marginTop: 24 }}>Expired Domains Found (No DNS)</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: 'collapse' }}>
         <thead>
@@ -269,9 +265,7 @@ export default function Scanner() {
                     {domain}
                   </a>
                 </td>
-                <td>
-                    No DNS (NXDOMAIN/ENOTFOUND)
-                </td>
+                <td>No DNS (NXDOMAIN/ENOTFOUND)</td>
               </tr>
             ))
           ) : (

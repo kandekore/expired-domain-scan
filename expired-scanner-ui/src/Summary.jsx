@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 
-export default function Summary() {
+// The component now accepts the onWebsiteSelect function as a prop
+export default function Summary({ onWebsiteSelect }) {
     const [summary, setSummary] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
 
@@ -23,7 +24,7 @@ export default function Summary() {
     return (
         <div>
             <h2>Scans Summary</h2>
-            <p>This page shows a count of all expired domains found for each website you have scanned.</p>
+            <p>This page shows a count of all expired domains found for each website you have scanned. Click a website to see its results.</p>
             <table width="100%" cellPadding="6" style={{ borderCollapse: 'collapse', marginTop: '16px' }}>
                 <thead>
                     <tr>
@@ -37,7 +38,19 @@ export default function Summary() {
                     ) : summary.length ? (
                         summary.map((item) => (
                             <tr key={item.website}>
-                                <td>{item.website}</td>
+                                <td>
+                                    {/* Make the website name a clickable button-like link */}
+                                    <a
+                                        href="#"
+                                        onClick={(e) => {
+                                            e.preventDefault();
+                                            onWebsiteSelect(item.website);
+                                        }}
+                                        style={{ color: '#2563eb', textDecoration: 'underline', cursor: 'pointer' }}
+                                    >
+                                        {item.website}
+                                    </a>
+                                </td>
                                 <td>{item.count}</td>
                             </tr>
                         ))

@@ -6,24 +6,12 @@ import { MongoClient } from 'mongodb';
 import dotenv from 'dotenv';
 import { createCrawler } from './worker.js';
 
-// --- ADD THIS BLOCK TO CATCH UNHANDLED ERRORS ---
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Application specific logging, throwing an error, or other logic here
-});
-
-process.on('uncaughtException', (err, origin) => {
-  console.error(`Caught exception: ${err}\n` + `Exception origin: ${origin}`);
-});
-// --- END OF NEW BLOCK ---
-
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- MongoDB Connection ---
 const mongoUrl = process.env.MONGO_URL || 'mongodb://localhost:27017';
 const client = new MongoClient(mongoUrl);
 let resultsCollection;
@@ -41,8 +29,6 @@ async function connectToMongo() {
     process.exit(1);
   }
 }
-// --- End MongoDB Connection ---
-
 
 const scans = new Map();
 
@@ -69,9 +55,8 @@ app.get('/scan/status', async (req, res) => {
     }
 });
 
-
 app.post('/scan', async (req, res) => {
-  const { startUrl, maxPages = 1000, concurrency = 5, mode = 'new' } = req.body || {};
+  const { startUrl, maxPages = 1000, concurrency = 5, mode = 'new', isAggressive = true } = req.body;
   if (!startUrl) return res.status(400).json({ error: 'startUrl is required' });
 
   let url;
@@ -101,6 +86,7 @@ app.post('/scan', async (req, res) => {
     maxPages,
     concurrency,
     mode,
+    isAggressive, // Pass the flag to the worker
     events: { emit: (_, payload) => forward(payload) },
     scansCollection,
     resultsCollection
@@ -122,20 +108,15 @@ app.get('/events/:id', (req, res) => {
         res.status(404).end();
         return;
     }
-
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
-
     const send = (msg) => {
         res.write(`data: ${JSON.stringify(msg)}\n\n`);
     };
-
     send({ type: 'connected', id });
-
     const onProgress = (msg) => send(msg);
     rec.events.on('progress', onProgress);
-
     req.on('close', () => {
         rec.events.off('progress', onProgress);
     });
@@ -157,31 +138,15 @@ app.get('/results', async (req, res) => {
 app.get('/summary', async (req, res) => {
     try {
         const summary = await resultsCollection.aggregate([
-            {
-                $group: {
-                    _id: "$website",
-                    count: { $sum: 1 }
-                }
-            },
-            {
-                $project: {
-                    website: "$_id",
-                    count: 1,
-                    _id: 0
-                }
-            },
-            {
-                $sort: {
-                    website: 1
-                }
-            }
+            { $group: { _id: "$website", count: { $sum: 1 } } },
+            { $project: { website: "$_id", count: 1, _id: 0 } },
+            { $sort: { website: 1 } }
         ]).toArray();
         res.json(summary);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch summary' });
     }
 });
-
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => {

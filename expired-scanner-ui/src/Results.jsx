@@ -1,91 +1,63 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 
-export default function Results() {
-    const [results, setResults] = useState([]);
-    const [website, setWebsite] = useState('');
-    const [tld, setTld] = useState('');
+// The component now accepts the onWebsiteSelect function as a prop
+export default function Summary({ onWebsiteSelect }) {
+    const [summary, setSummary] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
 
     useEffect(() => {
-        fetchResults();
+        const fetchSummary = async () => {
+            setIsLoading(true);
+            try {
+                const { data } = await axios.get('http://localhost:4000/summary');
+                setSummary(data);
+            } catch (error) {
+                console.error("Failed to fetch summary", error);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+        fetchSummary();
     }, []);
-
-    const fetchResults = async () => {
-        setIsLoading(true);
-        const params = {};
-        if (website) params.website = website;
-        if (tld) params.tld = tld;
-        try {
-            const { data } = await axios.get('http://localhost:4000/results', { params });
-            setResults(data);
-        } catch (error) {
-            console.error("Failed to fetch results", error);
-        } finally {
-            setIsLoading(false);
-        }
-    };
-    
-    const handleSearch = (e) => {
-        e.preventDefault();
-        fetchResults();
-    }
 
     return (
         <div>
-            <h2>Stored Expired Domain Results</h2>
-            <form onSubmit={handleSearch} style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
-                <input
-                    value={website}
-                    onChange={(e) => setWebsite(e.target.value)}
-                    placeholder="Filter by website (e.g., example.com)"
-                    style={{ flex: 1, padding: 8 }}
-                />
-                <input
-                    value={tld}
-                    onChange={(e) => setTld(e.target.value)}
-                    placeholder="Filter by TLD (e.g., com)"
-                    style={{ width: 150, padding: 8 }}
-                />
-                <button type="submit" disabled={isLoading}>{isLoading ? 'Searching...' : 'Search'}</button>
-            </form>
-            <table width="100%" cellPadding="6" style={{ borderCollapse: 'collapse' }}>
+            <h2>Scans Summary</h2>
+            <p>This page shows a count of all expired domains found for each website you have scanned. Click a website to see its results.</p>
+            <table width="100%" cellPadding="6" style={{ borderCollapse: 'collapse', marginTop: '16px' }}>
                 <thead>
                     <tr>
                         <th align="left">Website Scanned</th>
-                        <th align="left">Expired Domain Found</th>
-                        <th align="left">Status</th>
-                        <th align="left">Expiry Date / Reason</th>
-                        <th align="left">Date Found</th>
+                        <th align="left">Expired Domains Found</th>
                     </tr>
                 </thead>
                 <tbody>
                     {isLoading ? (
-                        <tr><td colSpan="5">Loading...</td></tr>
-                    ) : results.length ? (
-                        results.map((result) => (
-                            <tr key={result._id}>
-                                <td>{result.website}</td>
+                        <tr><td colSpan="2">Loading...</td></tr>
+                    ) : summary.length ? (
+                        summary.map((item) => (
+                            <tr key={item.website}>
                                 <td>
+                                    {/* Make the website name a clickable button-like link */}
                                     <a
-                                        href={`http://${result.domain}`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        style={{ color: '#2563eb', textDecoration: 'underline' }}
+                                        href="#"
+                                        onClick={(e) => {
+                                            e.preventDefault();
+                                            onWebsiteSelect(item.website);
+                                        }}
+                                        style={{ color: '#2563eb', textDecoration: 'underline', cursor: 'pointer' }}
                                     >
-                                        {result.domain}
+                                        {item.website}
                                     </a>
                                 </td>
-                                <td>{result.status}</td>
-                                {/* --- UPDATED LOGIC: Show date or reason --- */}
-                                <td>{result.expiryDate || result.expiryDateReason || 'N/A'}</td>
-                                <td>{new Date(result.foundAt).toLocaleString()}</td>
+                                <td>{item.count}</td>
                             </tr>
                         ))
                     ) : (
                         <tr>
-                            <td colSpan="5" style={{ color: '#777' }}>
-                                No results found for the current filters.
+                            <td colSpan={2} style={{ color: '#777' }}>
+                                No scan results found in the database.
                             </td>
                         </tr>
                     )}
